@@ -37,6 +37,8 @@ CCharacter::CCharacter(CGameWorld *pWorld) :
 	m_IsFiring = false;
 
 	m_LatestPrevPrevInput = m_LatestPrevInput = m_LatestInput = m_PrevInput = m_SavedInput = m_Input;
+
+	m_IsAssassin = false;
 }
 
 CCharacter::~CCharacter()
@@ -436,6 +438,8 @@ void CCharacter::Tick()
 
 	DDRaceTick();
 
+	InvTick();
+
 	Antibot()->OnCharacterTick(m_pPlayer->GetCID());
 
 	m_Core.m_Input = m_Input;
@@ -643,12 +647,28 @@ void CCharacter::Die(int Killer, int Weapon)
 
 bool CCharacter::TakeDamage(vec2 Force, int Dmg, int From, int Weapon, int WeaponID, bool IsExplosion)
 {
+	if(m_InvTimmer > 0)
+	{
+		m_InvTimmer = 0;
+		m_InvCounter = 200;
+		GameWorld()->CreateSound(m_Pos, SOUND_PLAYER_SPAWN);
+	}
+	
 	// m_pPlayer only inflicts half damage on self
 	if(From == m_pPlayer->GetCID())
 		Dmg = maximum(1, Dmg / 2);
 
 	if(From >= 0)
 	{
+		CCharacter *pAttacker = GameServer()->GetPlayerChar(From);
+		if(pAttacker && (pAttacker->m_InvTimmer > 0))
+		{
+			pAttacker->m_InvTimmer = 0;
+			pAttacker->m_InvCounter = 200;
+			GameWorld()->CreateSound(m_Pos, SOUND_PLAYER_SPAWN);
+		}
+
+
 		if(Controller()->IsFriendlyFire(m_pPlayer->GetCID(), From))
 			Dmg = 0;
 	}
@@ -976,7 +996,8 @@ void CCharacter::Snap(int SnappingClient, int OtherMode)
 	if(m_Disabled)
 		return;
 
-	SnapCharacter(SnappingClient, m_pPlayer->GetCID());
+	if((!m_Invisibility && !(m_InvTimmer > 0)) || m_pPlayer->GetCID() == SnappingClient)
+		SnapCharacter(SnappingClient, m_pPlayer->GetCID());
 
 	CNetObj_DDNetCharacter *pDDNetCharacter = static_cast<CNetObj_DDNetCharacter *>(Server()->SnapNewItem(NETOBJTYPE_DDNETCHARACTER, m_pPlayer->GetCID(), sizeof(CNetObj_DDNetCharacter)));
 	if(!pDDNetCharacter)
@@ -1069,6 +1090,9 @@ void CCharacter::Snap(int SnappingClient, int OtherMode)
 		//pDDNetCharacter->m_Flags |= CHARACTERFLAG_IN_FREEZE;
 	}
 	pDDNetCharacter->m_TuneZoneOverride = -1;
+
+	if(m_Invisibility || m_InvTimmer > 0)
+		pDDNetCharacter->m_Flags |= CHARACTERFLAG_INVINCIBLE;
 }
 
 // DDRace
@@ -2233,5 +2257,100 @@ void CCharacter::DDRaceInit()
 				}
 			}
 		}
+	}
+}
+
+void CCharacter::SetInv(int InvTime)
+{
+	m_InvTime = InvTime;
+	m_InvTimmer = m_InvTime;
+}
+
+void CCharacter::InvTick()
+{
+	if(m_InvTimmer > 0)
+		m_InvTimmer--;
+	if(m_InvTimmer < 0)
+		m_InvTimmer = 0;
+
+	int MinDelay = 2;
+	int MaxDelay = 20;
+	CClientMask Mask;
+	Mask.set(m_pPlayer->GetCID());
+	CEntity *apEnts[MAX_CLIENTS];
+	float Radius = GetProximityRadius() * 30.0f;
+	int Num = GameWorld()->FindEntities(m_Pos, Radius, apEnts, MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
+
+	if(m_SoundDelayTicks <= 0)
+	{
+		for(int i = 0; i < Num; ++i)
+		{
+			auto *pChr = static_cast<CCharacter *>(apEnts[i]);
+			if(pChr == this)
+				continue;
+			if(!(pChr->m_Invisibility || pChr->m_InvTimmer > 0))
+				continue;
+			if(distance(pChr->m_Pos, m_Pos) > (GetProximityRadius() * 30.0f))
+				continue;
+
+			GameWorld()->CreateSound(pChr->m_Pos, SOUND_HIT, Mask);
+
+			float Ratio = (distance(pChr->m_Pos, m_Pos) / Radius);
+			m_SoundDelayTicks = MinDelay + static_cast<int>(Ratio * (MaxDelay - MinDelay));
+		}
+	}
+	else
+	{
+		m_SoundDelayTicks--;
+	}
+
+	if(m_Invisibility)
+	{
+		GameServer()->SendBroadcast("\n \n \n Remain [Infinity]                                                                                                                       ", m_pPlayer->GetCID(), false);
+	}
+	else if(m_InvTimmer > 0)
+	{
+		float RemainingTime = (float)m_InvTimmer / m_InvTime;
+
+		if(RemainingTime >= 0 && RemainingTime <= 1)
+		{
+			char buf[9] = {0};
+			for(int i = 0; i < 8; i++)
+			{
+				if((float)i / 8 < RemainingTime)
+					buf[i] = 'l';
+				else
+					buf[i] = ' ';
+			}
+			buf[8] = '\0';
+			char aBuf[256];
+			str_format(aBuf, sizeof(aBuf), "\n \n \n Remain[%s]                                                                                                                       ", buf);
+			GameServer()->SendBroadcast(aBuf, m_pPlayer->GetCID(), false);
+		}
+	}
+	else
+		GameServer()->SendBroadcast("\n \n \n Remain [        ]                                                                                                                       ", m_pPlayer->GetCID(), false);
+
+
+	bool HasInput = (m_Input.m_Direction != 0 ||
+			 m_Input.m_Jump != 0 ||
+			 m_Input.m_Hook != 0 ||
+			 (m_Input.m_Fire & 1) != 0);
+
+	if(m_IsAssassin && !HasInput)
+	{
+		m_InvCounter--;
+		if(m_InvCounter < 0)
+			m_InvCounter = 0;
+		if(m_InvCounter == 0)
+			SetInv(400);
+	}
+	else
+		m_InvCounter = 150;
+
+	if(m_ActiveWeaponSlot != WEAPON_HAMMER)
+	{
+		m_InvCounter = 150;
+		m_InvTimmer = 0;
 	}
 }

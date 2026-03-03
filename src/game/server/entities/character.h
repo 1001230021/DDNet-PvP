@@ -299,6 +299,18 @@ public:
 		int m_HitOrder;
 		bool m_FirstImpact;
 	} m_HitData;
+
+	// 100123
+	int m_SoundDelayTicks;
+	bool m_Invisibility;
+	int m_InvTimmer;
+	int m_InvTime = 400;
+
+	bool m_IsAssassin = false;
+	int m_InvCounter = 200;
+
+	void SetInv(int InvTime);
+	void InvTick();
 };
 
 enum
